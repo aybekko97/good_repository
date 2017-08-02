@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
+import datetime
 
 import telebot
 import cherrypy
@@ -18,10 +19,29 @@ sys.path.append("thesun/ML/Controller/")
 sys.path.append("thesun/ML/")
 from System import *
 
+#TRAINING MODEL
 system = System()
 
 system.choose_model()
 system.train_model()
+
+#LOGGING SETTING
+logging.basicConfig(level=logging.DEBUG,
+                    filename='system.log',
+                    format= "%(asctime)s - %(levelname)s - %(lineno)s - %(message)s")
+
+
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+handler = logging.FileHandler('history.log')
+handler.setLevel(logging.INFO)
+
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(lineno)s - %(message)s')
+handler.setFormatter(formatter)
+
+logger.addHandler(handler)
 
 from AddressHandler import *
 
@@ -41,6 +61,8 @@ bot = telebot.TeleBot(config.token)
 
 flat_dict = {}
 step = {}
+query_limit = {}
+last_query_time = {}
 
 # Наш вебхук-сервер
 class WebhookServer(object):
@@ -113,6 +135,8 @@ furnitureSelect.add(*furniture_list)
 flooringSelect = types.ReplyKeyboardMarkup(one_time_keyboard=True)
 flooringSelect.add(*flooring_list)
 
+feedbackSelect = types.ReplyKeyboardMarkup(one_time_keyboard=True)
+feedbackSelect.add(*feedback_list)
 
 
 
@@ -145,10 +169,12 @@ to_ask = [True, True, True, False,
 	  False, False, True, True,
 	  False, False, False, False,
           False, False, False, False,
-          False, False, False]
+          False, False, False, True]
+
 '''
 to_ask = [True] * 23
 '''
+
 questions = ['Сколько комнат в квартире?',
              'Какой тип строения у квартиры?',
              'Год постройки дома(сдачи в эксплуатацию)?',
@@ -171,7 +197,8 @@ questions = ['Сколько комнат в квартире?',
              'Какая парковка есть рядом?',
              'Насколько мебелирована квартира?',
              'Каким материалом покрыт пол?',
-             'Высота потолков в квартире? (прим. "2.9" в метрах)']
+             'Высота потолков в квартире? (прим. "2.9" в метрах)',
+	     'Оцените, пожалуйста, результат относительно ваших ожидании.']
 
 
 selections = [roomSelect,
@@ -196,7 +223,8 @@ selections = [roomSelect,
               parkingSelect,
               furnitureSelect,
               flooringSelect,
-              None]
+              None,
+	      feedbackSelect]
 
 validations = [ validate_room,
          	validate_house_type,
@@ -209,6 +237,7 @@ validations = [ validate_room,
 		None,
 		None,
 		validate_addr_street,
+		None,
 		None,
 		None,
 		None,
@@ -253,6 +282,17 @@ def ask(message):
         cur_step = prev_step
         if (cur_step is None):
         	cur_step = 0
+        	if (chat_id not in query_limit): query_limit[chat_id] = 7
+        	_today = datetime.date.today().day
+        	if (query_limit[chat_id] == 0):
+        		logger.info(datetime.datetime.now())
+       			if (last_query_time[chat_id] != _today):
+       				query_limit[chat_id] = 7
+       			else:
+       				bot.send_message(chat_id, "Извините, вы исчерпали количество попыток.")
+       				return
+       		last_query_time[chat_id] = _today
+        	logger.info(" chat_id - [%s] : Asking is started!" % chat_id)
         else:
         	prev_step -= 1
         if (chat_id not in flat_dict):
@@ -260,9 +300,9 @@ def ask(message):
         while(cur_step < len(questions) and to_ask[cur_step] == False):
         	cur_step += 1
         #print(cur_step, prev_step)
-        print("ok")
-        if (prev_step is not None):
-        	print(message.text)
+        #print("ok")
+        if (prev_step is not None and prev_step != len(questions)-1):
+        	logger.info(" chat_id - [%s] : message - %s" % (chat_id, message.text))
         	flat = flat_dict[chat_id]
         	if (validations[prev_step] is not None):
         		vl = validations[prev_step](message.text)
@@ -273,11 +313,16 @@ def ask(message):
         		setattr(flat,attributes[prev_step], vl)
         	else:
         		setattr(flat,attributes[prev_step], message.text)
-        if (cur_step < len(questions)):
+        if (cur_step == len(questions)):
+                step[chat_id] = None
+                query_limit[chat_id] -= 1
+                logger.info(" chat_id - [%s] : message - User's feedback = %s" % (chat_id, message.text))
+                bot.send_message(chat_id, "Спасибо за ответ!\nУ вас осталось %s попыток на сегодня." % query_limit[chat_id])
+        if (cur_step < len(questions)-1):
             msg = bot.send_message(chat_id, '*'+questions[cur_step]+'*', reply_markup=selections[cur_step], parse_mode="Markdown")
             bot.register_next_step_handler(msg, ask)
             step[chat_id] = cur_step + 1
-        else:
+        elif (cur_step == len(questions)-1):
             data = flat.__dict__
             if (type(data['addr_number']) == int):
             	data['addr_number'] = unicode(data['addr_number'])
@@ -293,7 +338,7 @@ def ask(message):
             del data['addr_number']
             if ('type' in data): del data['type']
 	    if ('dtype' in data): del data['dtype']
-            print(data)
+            d = data
             data['id'] = 0
             data['price'] = '0'
             data['last_update_script'] = ''
@@ -303,18 +348,26 @@ def ask(message):
             print(df.head())
             print(df.dtypes)
             msg = bot.send_message(chat_id, "Calculating...")
-            bot.send_message(chat_id, "Я думаю, подходящая цена - " + str(system.model.predict_price(df)['price'][df.index[0]] ) )
-            step[chat_id] = None
+            price = str(system.model.predict_price(df)['price'][df.index[0]])
+            logger.info(" chat_id - [%s] : message - finished, predicted price - %s" % (chat_id, price))
+            bot.send_message(chat_id, "Я думаю, подходящая цена - " + price)
+            msg = bot.send_message(chat_id, '*'+questions[cur_step]+'*', reply_markup=selections[cur_step], parse_mode="Markdown")
+            step[chat_id] = cur_step + 1
+            bot.register_next_step_handler(msg, ask)
     except Exception as e:
-        bot.reply_to(message, 'Что-то пошло не так.\n Лог ошибки: %s' % (e.strerror) )
+        logger.error(" chat_id - [%s] : message - %s" % (message.chat.id, e.strerror))
+        bot.reply_to(message, 'Что-то пошло не так.')
         step[message.chat.id] = 0
-
 
 
 @bot.message_handler(func=lambda message: in_step_handler(message.chat.id) == False, content_types=['text'])
 def echo_message(message):
-	bot.reply_to(message, myapiai.get_response(message.text))
-
+	try:
+		logger.info(" chat_id - [%s] : message - %s" % (message.chat.id, message.text))
+		bot.reply_to(message, myapiai.get_response(message.text))
+	except Exception as e:
+		logger.error(" chat_id - [%s] : message - %s" % (message.chat.id, e.strerror))
+		bot.reply_to(message, '   ^   - ^         ^            ^     .')
 
 # Снимаем вебхук перед повторной установкой (избавляет от некоторых проблем)
 bot.remove_webhook()

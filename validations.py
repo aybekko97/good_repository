@@ -67,6 +67,12 @@ flooring_list = ['линолеум',
                    'плитка',
                    'пробковое']
 
+feedback_list = ['очень дешево',
+		 'дешево',
+		 'нормально',
+		 'дорого',
+		 'очень дорого']
+
 def validate_room(msg):
 	room_cnt = ''.join([c for c in msg if c in '1234567890.']).strip()
 	if (room_cnt.isdigit() and int(room_cnt) > 0 and int(room_cnt) < 10):
